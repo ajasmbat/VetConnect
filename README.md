@@ -120,5 +120,9 @@ everything still works end-to-end.
 - Input validation via Pydantic on every endpoint.
 - CORS is limited to the Vite dev origin (`http://localhost:5173`) — adjust
   `CORS_ORIGIN` for deploys.
+- `/api/assistant` is per-IP rate-limited (default 10/minute, 60/hour) so a
+  scraper can't burn through the OpenAI budget. Tune with
+  `ASSISTANT_RATE_PER_MINUTE` / `ASSISTANT_RATE_PER_HOUR`.
 - No PHI is fetched, cached, or logged. The `searches` table only stores the
   raw user question text and the parsed intent, to help iterate on the assistant.
+# VetConnect
