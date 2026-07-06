@@ -1,12 +1,36 @@
-"""Minimal offline geocoder for common U.S. cities.
+"""Geocoder — turn a place string into (latitude, longitude).
 
-Keeps the demo self-contained: no external geocoding key required to try the
-example queries. For real use you'd swap this out for a proper geocoder.
+Given input like "Los Angeles", "90210", or "123 Main St, Denver CO", we need
+coordinates so we can hit the VA Facilities API. This module tries three tiers,
+in order, and returns as soon as one succeeds:
+
+    1. SQLite cache      — repeated lookups skip the network entirely.
+    2. Nominatim (OSM)   — free, no API key. Handles cities, ZIPs, addresses.
+    3. Curated city dict — hard-coded lat/long for ~48 major U.S. cities.
+                           Kept as an offline safety net so the demo works
+                           without internet.
+
+Nominatim's usage policy: max 1 request/second and a *distinctive* User-Agent.
+See `NOMINATIM_UA`. Generic UAs (e.g. anything containing "example.com") are
+rejected with HTTP 403.
 """
 
+import json
 from typing import Optional
 
-# Curated set biased toward cities with major VA facilities.
+import httpx
+
+from . import db
+from .config import get_settings
+
+# Endpoint + UA now come from Settings so forkers/deployers can override without
+# editing source. See `Settings.nominatim_url` / `nominatim_user_agent`.
+# Nominatim's abuse filter rejects generic contacts (e.g. example.com) with
+# HTTP 403, so `nominatim_user_agent` MUST be distinctive per deployment.
+
+# Offline fallback — hard-coded lat/long for cities that host major VA sites.
+# Substring matched (case-insensitive), so "Los Angeles" wins for the query
+# "mental health near Los Angeles, CA".
 CITY_COORDS: dict[str, tuple[float, float]] = {
     "los angeles": (34.0522, -118.2437),
     "long beach": (33.7701, -118.1937),
@@ -60,11 +84,137 @@ CITY_COORDS: dict[str, tuple[float, float]] = {
 }
 
 
-def geocode_city(text: str) -> Optional[tuple[float, float]]:
-    """Return (lat, long) for a substring matching a known city, else None."""
+def _dict_lookup(text: str) -> Optional[tuple[float, float]]:
+    """Look for any known city name inside `text`.
+
+    Case-insensitive substring match. Longer names win first (so "long beach"
+    beats "los angeles" for a query mentioning both).
+
+    Args:
+        text: Free-form query string.
+
+    Returns:
+        (lat, long) tuple if a city name appears in `text`, else None.
+    """
     t = (text or "").lower()
-    # Prefer longer matches first (e.g. "san diego" over "san").
     for name in sorted(CITY_COORDS, key=len, reverse=True):
         if name in t:
             return CITY_COORDS[name]
     return None
+
+
+async def _nominatim_lookup(text: str) -> Optional[tuple[float, float]]:
+    """Ask Nominatim (OpenStreetMap) to resolve `text` to coordinates.
+
+    Never raises — any failure (network, HTTP error, bad JSON, empty result)
+    returns None so the caller can try the next tier. Every failure branch
+    logs a one-line hint so we can diagnose 403s / rate limits later.
+
+    Args:
+        text: A place string. Anything trimmable to empty short-circuits.
+
+    Returns:
+        (lat, long) tuple on success, otherwise None.
+    """
+    q = (text or "").strip()
+    if not q:
+        return None
+    settings = get_settings()
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(
+                settings.nominatim_url,
+                params={
+                    "q": q,
+                    "format": "json",
+                    "limit": 1,
+                    "countrycodes": "us",
+                },
+                headers={
+                    "User-Agent": settings.nominatim_user_agent,
+                    "Accept": "application/json",
+                },
+            )
+        if r.status_code != 200:
+            print(f"[geocode] Nominatim HTTP {r.status_code} for {q!r}: {r.text[:200]!r}")
+            return None
+        try:
+            results = r.json()
+        except Exception as e:
+            print(f"[geocode] Nominatim JSON parse failed for {q!r}: {e}; body={r.text[:200]!r}")
+            return None
+        # Nominatim should always return a JSON list. Anything else means
+        # the response is unusable — fall through to the dict tier.
+        if not isinstance(results, list):
+            print(f"[geocode] Nominatim returned non-list for {q!r}: {type(results).__name__}")
+            return None
+        if not results:
+            print(f"[geocode] Nominatim empty result list for {q!r}")
+            return None
+        top = results[0]
+        lat = top.get("lat")
+        lon = top.get("lon")
+        if lat is None or lon is None:
+            print(f"[geocode] Nominatim top result missing lat/lon for {q!r}: {top!r}")
+            return None
+        return (float(lat), float(lon))
+    except Exception as e:
+        print(f"[geocode] Nominatim exception for {q!r}: {type(e).__name__}: {e}")
+        return None
+
+
+def _cache_key(text: str) -> str:
+    """Build the cache key for a geocode lookup.
+
+    We stash a small JSON object so different query types (geocode, VA
+    search, VA detail) can share the same table without collisions.
+
+    Args:
+        text: The place string being geocoded.
+
+    Returns:
+        A stable, canonical string suitable as a SQLite key.
+    """
+    return json.dumps({"kind": "geocode", "q": (text or "").strip().lower()}, sort_keys=True)
+
+
+async def geocode(text: str) -> Optional[tuple[float, float]]:
+    """Resolve a place string to (lat, long).
+
+    Tries cache → Nominatim → curated dict, in that order. On success, the
+    result is written back to the cache so the next call is free.
+
+    Args:
+        text: Anything a user might type — city, ZIP, or full address.
+              Empty or None returns None immediately.
+
+    Returns:
+        (lat, long) tuple, or None if every tier failed.
+    """
+    if not text:
+        return None
+    key = _cache_key(text)
+    cached = db.get_cached(key)
+    if cached:
+        return (cached[0], cached[1])
+
+    coords = await _nominatim_lookup(text)
+    if coords is None:
+        coords = _dict_lookup(text)
+        if coords is not None:
+            print(f"[geocode] Nominatim miss for {text!r}; using curated dict fallback")
+    if coords:
+        db.set_cached(key, [coords[0], coords[1]])
+    return coords
+
+
+def geocode_city(text: str) -> Optional[tuple[float, float]]:
+    """Synchronous, dict-only geocode. Kept for legacy callers.
+
+    Args:
+        text: A place string.
+
+    Returns:
+        (lat, long) tuple from the curated dict, or None if no match.
+    """
+    return _dict_lookup(text)

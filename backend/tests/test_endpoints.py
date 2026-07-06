@@ -105,3 +105,24 @@ def test_assistant_gracefully_reports_no_location(client, mock_va):
 def test_assistant_rejects_empty_question(client):
     r = client.post("/api/assistant", json={"question": ""})
     assert r.status_code == 422
+
+
+def test_assistant_rate_limit_returns_429_after_burst(client, mock_va, monkeypatch):
+    # Squeeze the per-minute limit so the burst is small and quick to run.
+    from app import config
+
+    settings = config.get_settings()
+    monkeypatch.setattr(settings, "assistant_rate_per_minute", 3)
+    monkeypatch.setattr(settings, "assistant_rate_per_hour", 100)
+
+    payload = {"question": "primary care near Los Angeles"}
+    # First 3 succeed.
+    for _ in range(3):
+        r = client.post("/api/assistant", json=payload)
+        assert r.status_code == 200
+
+    # 4th trips the limiter.
+    r = client.post("/api/assistant", json=payload)
+    assert r.status_code == 429
+    assert "try again" in r.json()["detail"].lower()
+    assert r.headers.get("retry-after")

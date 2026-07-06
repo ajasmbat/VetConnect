@@ -5,9 +5,25 @@ import type { AssistantResponse } from "./types";
 
 const EXAMPLES = [
   "Mental health near Los Angeles",
-  "Dental in Phoenix",
-  "Nearest Vet Center to Riverside",
+  "Cardiology in San Diego",
+  "PTSD care near San Antonio",
   "Primary care in Houston",
+  "Physical therapy in Seattle",
+  "Optometry near Phoenix",
+  "Dental care in Denver",
+  "Emergency care in Chicago",
+  "Audiology near Portland",
+  "Pharmacy in Atlanta",
+  "Women veteran care in Miami",
+  "Nutrition in Nashville",
+  "Homeless services in Detroit",
+  "Cancer care near Cleveland",
+  "Dermatology in Minneapolis",
+  "Orthopedics in Philadelphia",
+  "Podiatry near Tampa",
+  "Urology in Dallas",
+  "Neurology in New York",
+  "Sleep medicine in Salt Lake City",
 ];
 
 export default function App() {
@@ -113,7 +129,11 @@ export default function App() {
           <h2>{result.facilities.length} facilities</h2>
           <div className="grid">
             {result.facilities.map((f) => (
-              <FacilityCard key={f.id} facility={f} />
+              <FacilityCard
+                key={f.id}
+                facility={f}
+                highlightService={result.parsed_service}
+              />
             ))}
           </div>
         </section>

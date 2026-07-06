@@ -19,6 +19,12 @@ def client(tmp_path, monkeypatch):
     settings = config.get_settings()
     settings.sqlite_path = str(tmp_path / "test.db")
 
+    # Rate limiter is a module-level singleton; clear it so per-IP counts
+    # from one test don't bleed into the next.
+    from app.rate_limit import limiter
+
+    limiter.reset()
+
     from app.main import app
 
     with TestClient(app) as c:

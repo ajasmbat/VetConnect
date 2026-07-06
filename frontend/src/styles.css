@@ -190,6 +190,13 @@ body {
   border-radius: 999px;
 }
 
+/* Highlight the service(s) the user actually asked for. */
+.services li.matched {
+  background: var(--brand);
+  color: var(--brand-ink);
+  font-weight: 600;
+}
+
 .actions {
   margin-top: auto;
   display: flex;
